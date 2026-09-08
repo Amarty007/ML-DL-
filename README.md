@@ -1,73 +1,115 @@
 # 🤖 ML + DL Playground
 
-Ek interactive web app jisme CSV data upload karke Machine Learning aur Deep
-Learning dono models ko train/test kar sakte ho, aur training process **live**
-dekh sakte ho.
+Ye project ek interactive Streamlit app hai jisme aap CSV dataset upload karke
+multiple machine learning aur deep learning models ko train aur compare kar sakte ho.
 
 ## ✨ Features
 
-- **CSV Upload**: Koi bhi tabular dataset upload karo (Iris, Titanic, ya
-  apna khud ka data)
-- **Auto Preprocessing**: Missing values, categorical encoding, feature
-  scaling — sab automatic
-- **Machine Learning Models**:
-  - Logistic Regression
-  - Decision Tree
-  - Random Forest
-  - K-Nearest Neighbors (KNN)
-  - Support Vector Machine (SVM)
-  - Naive Bayes
-- **Deep Learning Model**: Configurable Artificial Neural Network (ANN)
-  - Hidden layers, neurons, epochs, batch size — sab adjust kar sakte ho
-  - **Live epoch-by-epoch training graph** (accuracy + loss)
-- **Evaluation**: Accuracy, Precision, Recall, F1 Score, Confusion Matrix,
-  Classification Report
-- **Model Comparison**: Sab trained models ki accuracy ek table/chart mein
-  compare karo
+- CSV upload support for tabular classification datasets
+- Target column selection
+- Train/test split controls
+- Automatic dataset preview and column information
+- Model comparison for multiple classifiers
+- Deep learning ANN model with live epoch-wise training curve
+- Evaluation metrics such as accuracy, precision, recall, F1 score
+- Confusion matrix and classification report
+- Comparison table for all trained models
 
-## 🚀 Kaise Run Karein
+## 🧠 Included Models
 
-### 1. Python installed hona chahiye (3.9 - 3.11 recommended)
+### Machine Learning
+- Logistic Regression
+- Ridge Classifier
+- SGD Classifier
+- Passive Aggressive Classifier
+- Decision Tree
+- Extra Tree
+- Random Forest
+- Extra Trees
+- AdaBoost
+- Gradient Boosting
+- HistGradientBoosting
+- K-Nearest Neighbors (KNN)
+- SVM / Linear SVM
+- Gaussian Naive Bayes
+- Multinomial Naive Bayes
+- Bernoulli Naive Bayes
+- MLP Classifier
 
-### 2. Virtual environment banao (optional but recommended)
+### Deep Learning
+- Artificial Neural Network (ANN) built with scikit-learn MLP
+- Live training progression tracking with accuracy/loss visualization
+
+## 🚀 Setup
+
+### 1. Python install hona chahiye
+Recommended version: Python 3.9 to 3.11
+
+### 2. Virtual environment create karo
 
 ```bash
-python -m venv venv
-# Windows:
-venv\Scripts\activate
-# Mac/Linux:
-source venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 ```
 
-### 3. Required libraries install karo
+Windows ke liye:
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+### 3. Dependencies install karo
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. App run karo
+### 4. App start karo
 
 ```bash
 streamlit run app.py
 ```
 
-Ye command chalate hi browser mein automatically app khul jayega
-(usually `http://localhost:8501`).
+Browser me app normally `http://localhost:8501` par khulega.
 
-## 📝 Kaise Use Karein
+## 📝 Usage
 
-1. Apni CSV file upload karo
-2. Target column select karo (jo predict karna hai)
-3. Test data ka percentage set karo
-4. ML models select karke "Train karo" button dabao
-5. DL model ke settings adjust karke train karo — live graph dekhoge
-6. Neeche comparison table mein sab models ka result dekho
+1. CSV file upload karo
+2. Target column select karo
+3. Test size configure karo
+4. ML model choose karke train karo
+5. ANN ke settings adjust karke deep learning model train karo
+6. Results aur model comparison table dekho
 
-## 💡 Testing ke liye Sample Datasets
+## 📊 Sample Datasets
 
-Agar apna data nahi hai, to ye try kar sakte ho:
-- Iris dataset: https://archive.ics.uci.edu/dataset/53/iris
-- Titanic dataset: Kaggle pe search karo "Titanic - Machine Learning from Disaster"
+Agar demo ke liye dataset chahiye to inme se ek try kar sakte ho:
+- Iris dataset
+- Titanic dataset
+- Any custom classification CSV
+
+## ⚠️ Notes
+
+- App mainly classification tasks ke liye designed hai
+- Large files are limited to keep the app responsive
+- For a clean setup, use the included virtual environment
+
+## 🔧 Troubleshooting
+
+- If dependency install fails, try reinstalling with:
+  ```bash
+  pip install --upgrade pip
+  pip install -r requirements.txt
+  ```
+- Agar port busy ho to:
+  ```bash
+  streamlit run app.py --server.port 8502
+  ```
+- Agar TensorFlow installation issue aaye to:
+  ```bash
+  pip install tensorflow-cpu
+  ```
 
 ## 🔧 Troubleshooting
 
