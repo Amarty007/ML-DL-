@@ -16,6 +16,10 @@ Run karne ke liye:
 import streamlit as st
 import pandas as pd
 import numpy as np
+import os
+import io
+import joblib
+import tempfile
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -48,20 +52,10 @@ from sklearn.metrics import (
     f1_score,
 )
 
-try:
-    from xgboost import XGBClassifier
-except ImportError:
-    XGBClassifier = None
-
-try:
-    from lightgbm import LGBMClassifier
-except ImportError:
-    LGBMClassifier = None
-
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-
+# Optional boosters are disabled at startup to keep the Streamlit process light.
+# The core model set below does not depend on either package.
+XGBClassifier = None
+LGBMClassifier = None
 
 # ---------------------------------------------------------------------------
 # Page config & Custom Styling
@@ -169,6 +163,9 @@ with col_title_2:
 if "results" not in st.session_state:
     st.session_state.results = {}  # {model_name: {metrics...}}
 
+if "model_artifacts" not in st.session_state:
+    st.session_state.model_artifacts = {}
+
 
 # ---------------------------------------------------------------------------
 # STEP 1: Upload Data
@@ -201,7 +198,21 @@ if uploaded_file is None:
     """, unsafe_allow_html=True)
     st.stop()
 
-df = pd.read_csv(uploaded_file)
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_ROWS = 50000
+
+if uploaded_file.size > MAX_UPLOAD_BYTES:
+    st.error(
+        f"Uploaded CSV is too large ({uploaded_file.size / (1024 * 1024):.1f} MB). "
+        f"Please upload a file smaller than {MAX_UPLOAD_BYTES / (1024 * 1024):.0f} MB."
+    )
+    st.stop()
+
+df = pd.read_csv(uploaded_file, nrows=MAX_UPLOAD_ROWS)
+if len(df) == MAX_UPLOAD_ROWS:
+    st.warning(
+        f"Only the first {MAX_UPLOAD_ROWS:,} rows were loaded to keep the app responsive."
+    )
 st.markdown(f"""
 <div class="success-box">
     <strong>✅ Dataset Loaded Successfully!</strong><br>
@@ -224,21 +235,44 @@ with st.expander("📊 **View Dataset Preview & Info**", expanded=False):
 
 
 # ---------------------------------------------------------------------------
+# STEP 1.4: Select Target Column FIRST
+# ---------------------------------------------------------------------------
+# FIX (Bug 3): Target column must be chosen BEFORE ID-column auto-detection.
+# Previously, ID detection ran first and could silently drop the target column
+# itself (e.g. a target named "diagnosis_id" or "class_code", or one that is
+# >95% unique) before the user ever got to pick it in the dropdown.
+st.markdown("---")
+st.markdown("## 🎯 Step 1.4: Select Target Column")
+target_col = st.selectbox(
+    "Select Target Column",
+    df.columns,
+    index=len(df.columns) - 1,
+    help="Choose the column to predict. Do this before ID auto-detection so your target is never accidentally excluded."
+)
+
+
+# ---------------------------------------------------------------------------
 # Auto-detect ID Columns
 # ---------------------------------------------------------------------------
 st.markdown("---")
 st.markdown("## 🔍 Step 1.5: Auto-Detect & Exclude ID Columns")
 
-def detect_id_columns(df_input):
+def detect_id_columns(df_input, exclude_col=None):
     """
     Auto-detect ID-like columns:
     - Column name contains 'id', 'index', 'pk', 'serial'
     - All values are unique or nearly unique (>95% unique)
     - Integer or string type
+
+    `exclude_col` (e.g. the chosen target column) is never flagged as an ID
+    column, even if its name or uniqueness would otherwise match.
     """
     id_columns = []
     
     for col in df_input.columns:
+        if col == exclude_col:
+            continue
+
         col_lower = col.lower()
         unique_ratio = df_input[col].nunique() / len(df_input)
         
@@ -253,7 +287,8 @@ def detect_id_columns(df_input):
     
     return id_columns
 
-detected_ids = detect_id_columns(df)
+# FIX (Bug 3): pass target_col as exclude_col so it's never dropped here.
+detected_ids = detect_id_columns(df, exclude_col=target_col)
 
 if detected_ids:
     st.info(f"🤖 **Auto-detected potential ID columns:** {', '.join(detected_ids)}")
@@ -276,19 +311,12 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# STEP 2: Select Target + Preprocessing
+# STEP 2: Preprocessing Configuration
 # ---------------------------------------------------------------------------
 st.markdown("---")
-st.markdown("## ⚙️ Step 2: Configure Target & Preprocessing")
+st.markdown("## ⚙️ Step 2: Configure Preprocessing")
 
-config_col1, config_col2, config_col3 = st.columns([1, 1, 1])
-with config_col1:
-    target_col = st.selectbox(
-        "Select Target Column",
-        df.columns,
-        index=len(df.columns) - 1,
-        help="Choose the column to predict"
-    )
+config_col2, config_col3 = st.columns([1, 1])
 with config_col2:
     test_size = st.slider(
         "Test Data Percentage",
@@ -302,6 +330,8 @@ with config_col3:
         value=42,
         help="For reproducibility"
     )
+
+st.caption(f"🎯 Target column selected in Step 1.4: **{target_col}**")
 
 # Feature Count Confirmation - BEFORE preprocessing
 available_features_before = [col for col in df.columns if col != target_col]
@@ -320,21 +350,59 @@ df = df.dropna(subset=[target_col])
 # Separate features and target
 X = df.drop(columns=[target_col])
 y = df[target_col]
+original_feature_data = X.copy()
 
 # Handle missing values in features (simple fill)
+numeric_fill_values = {}
+categorical_fill_values = {}
 for c in X.columns:
     # Check if column is numeric using proper type checking
     if pd.api.types.is_numeric_dtype(X[c]):
-        X[c] = X[c].fillna(X[c].mean())
+        numeric_fill_values[c] = X[c].mean()
+        X[c] = X[c].fillna(numeric_fill_values[c])
     else:
         # For non-numeric (string, object, etc.), fill with mode or default
-        X[c] = X[c].fillna(X[c].mode()[0] if not X[c].mode().empty else "missing")
+        categorical_fill_values[c] = (
+            X[c].mode()[0] if not X[c].mode().empty else "missing"
+        )
+        X[c] = X[c].fillna(categorical_fill_values[c])
 
 # Encode categorical features
+# FIX (OOM bug): pd.get_dummies() on a high-cardinality text column (e.g. a
+# "Name"/"Address"/"Comments" column with thousands of unique values) creates
+# one new column PER unique value. On a dataset of tens of thousands of rows
+# this can balloon to gigabytes of RAM instantly and get the process OOM-killed
+# by the OS (visible as Streamlit silently printing "Stopping...").
+#
+# Safeguard: any categorical column above ONEHOT_CARDINALITY_LIMIT unique
+# values is label-encoded (a single integer column) instead of one-hot
+# encoded. Columns below the limit keep the original one-hot behavior.
+ONEHOT_CARDINALITY_LIMIT = 50
+
 cat_cols = X.select_dtypes(include=["object", "string"]).columns.tolist()
-if cat_cols:
-    st.info(f"🔄 **Encoding categorical columns:** {', '.join(cat_cols)}")
-    X = pd.get_dummies(X, columns=cat_cols, drop_first=True, dtype=np.float64)
+high_card_cols = [c for c in cat_cols if X[c].nunique() > ONEHOT_CARDINALITY_LIMIT]
+low_card_cols = [c for c in cat_cols if c not in high_card_cols]
+high_card_maps = {}
+
+if high_card_cols:
+    st.warning(
+        f"⚠️ **High-cardinality columns label-encoded instead of one-hot** "
+        f"(too many unique values for safe one-hot encoding, would exhaust memory): "
+        f"{', '.join(high_card_cols)}"
+    )
+    for c in high_card_cols:
+        encoder = LabelEncoder()
+        X[c] = encoder.fit_transform(X[c].astype(str))
+        high_card_maps[c] = {
+            str(value): int(index)
+            for index, value in enumerate(encoder.classes_)
+        }
+
+if low_card_cols:
+    st.info(f"🔄 **Encoding categorical columns:** {', '.join(low_card_cols)}")
+    X = pd.get_dummies(X, columns=low_card_cols, drop_first=True, dtype=np.float64)
+
+cat_cols = low_card_cols  # for the info message shown further below stays accurate
 
 # Force every remaining column into numeric form. This keeps one-hot dummy columns
 # like Sex_male / Ticket_1234 as 0/1 floats, while dropping any leftover text columns.
@@ -346,6 +414,8 @@ if remaining_non_numeric:
 
 # Convert all columns to float64 to ensure compatibility
 X = X.astype("float64")
+training_feature_defaults = X.median(numeric_only=True).to_dict()
+preprocessed_feature_columns = list(X.columns)
 
 # Encode target if it's categorical/text
 label_encoder = None
@@ -536,7 +606,7 @@ def classify_model_fit(train_accuracy, test_accuracy):
     return "Best Fitting"
 
 
-def evaluate_and_store(name, y_true, y_pred, train_accuracy=None):
+def evaluate_and_store(name, y_true, y_pred, train_accuracy=None, model=None, model_type="sklearn"):
     test_accuracy = accuracy_score(y_true, y_pred)
     if train_accuracy is None:
         train_accuracy = test_accuracy
@@ -554,6 +624,26 @@ def evaluate_and_store(name, y_true, y_pred, train_accuracy=None):
         "Recall": rec,
         "F1 Score": f1,
         "Fit Status": fit_status,
+    }
+    st.session_state.model_artifacts[name] = {
+        "model": model,
+        "model_type": model_type,
+        "y_true": np.asarray(y_true),
+        "y_pred": np.asarray(y_pred),
+        "test_features": original_feature_data.loc[X_test.index].copy(),
+        "test_indices": X_test.index.to_numpy(),
+        "feature_columns": list(X_train.columns),
+        "target_classes": label_encoder.classes_.tolist() if label_encoder is not None else None,
+        "scaler": scaler,
+        "preprocessing": {
+            "raw_feature_columns": list(original_feature_data.columns),
+            "numeric_fill_values": numeric_fill_values,
+            "categorical_fill_values": categorical_fill_values,
+            "high_card_maps": high_card_maps,
+            "low_card_columns": low_card_cols,
+            "preprocessed_feature_columns": preprocessed_feature_columns,
+            "training_feature_defaults": training_feature_defaults,
+        },
     }
 
     # Metrics in nice columns
@@ -612,6 +702,63 @@ def evaluate_and_store(name, y_true, y_pred, train_accuracy=None):
     with st.expander("📋 **Detailed Classification Report**"):
         report_text = classification_report(y_true, y_pred, zero_division=0)
         st.code(report_text, language="text")
+
+
+def display_target_values(values, target_classes=None):
+    values = np.asarray(values)
+    if target_classes is not None:
+        return np.asarray(target_classes, dtype=object)[values.astype(int)]
+    return values
+
+
+def build_prediction_table(model_name, artifact):
+    test_features = artifact["test_features"].copy().reset_index(drop=True)
+    actual = display_target_values(artifact["y_true"], artifact["target_classes"])
+    predicted = display_target_values(artifact["y_pred"], artifact["target_classes"])
+    table = test_features
+    table.insert(0, "Test Row", artifact["test_indices"])
+    table["Actual Label"] = actual
+    table["Predicted Label"] = predicted
+    table["Correct"] = table["Actual Label"].to_numpy() == table["Predicted Label"].to_numpy()
+    table["Status"] = np.where(table["Correct"], "✅ Correct", "❌ Incorrect")
+    return table
+
+
+def preprocess_unseen_features(unseen_df, artifact):
+    """Apply the exact feature preparation used by the selected model."""
+    preprocessing = artifact["preprocessing"]
+    features = unseen_df.drop(columns=[target_col], errors="ignore").copy()
+    raw_columns = preprocessing["raw_feature_columns"]
+    features = features.reindex(columns=raw_columns)
+
+    for column, fill_value in preprocessing["numeric_fill_values"].items():
+        if column in features:
+            features[column] = pd.to_numeric(features[column], errors="coerce")
+            features[column] = features[column].fillna(fill_value)
+    for column, fill_value in preprocessing["categorical_fill_values"].items():
+        if column in features:
+            features[column] = features[column].fillna(fill_value).astype(str)
+
+    for column, value_map in preprocessing["high_card_maps"].items():
+        if column in features:
+            features[column] = features[column].astype(str).map(value_map).fillna(-1)
+
+    if preprocessing["low_card_columns"]:
+        features = pd.get_dummies(
+            features,
+            columns=preprocessing["low_card_columns"],
+            drop_first=True,
+            dtype=np.float64,
+        )
+    features = features.apply(lambda column: pd.to_numeric(column, errors="coerce"))
+    features = features.reindex(
+        columns=preprocessing["preprocessed_feature_columns"],
+        fill_value=np.nan,
+    )
+    features = features.fillna(
+        pd.Series(preprocessing["training_feature_defaults"])
+    ).fillna(0).astype("float64")
+    return features
 
 
 # ---------------------------------------------------------------------------
@@ -674,7 +821,10 @@ if st.button("🚀 **Train ML Models**", key="train_ml", use_container_width=Tru
                         y_pred = model.predict(X_test_scaled)
                 
                 st.success(f"✅ {name} training complete!")
-                evaluate_and_store(name, y_test, y_pred, train_accuracy=train_accuracy)
+                evaluate_and_store(
+                    name, y_test, y_pred, train_accuracy=train_accuracy,
+                    model=model, model_type="sklearn"
+                )
                 st.markdown("---")
     else:
         st.warning("⚠️ Please select at least one model to train.", icon="⚠️")
@@ -813,6 +963,18 @@ with arch_col3:
     st.metric("Output Neurons", output_neurons)
 
 if st.button("🚀 **Train Deep Learning Model**", key="train_dl", use_container_width=True):
+    os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "1")
+    os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
+    try:
+        from tensorflow import keras
+        from tensorflow.keras import layers
+    except ImportError:
+        st.error(
+            "TensorFlow is not available. Install it with `pip install tensorflow-cpu` "
+            "to use Deep Learning training."
+        )
+        st.stop()
+
     model = keras.Sequential()
     model.add(layers.Input(shape=(X_train_scaled.shape[1],)))
 
@@ -905,7 +1067,10 @@ if st.button("🚀 **Train Deep Learning Model**", key="train_dl", use_container
         y_pred = np.argmax(y_pred_probs, axis=1)
 
     train_accuracy = model.evaluate(X_train_scaled, y_train_dl, verbose=0)[1]
-    evaluate_and_store(f"Deep Learning ({dl_type})", y_test, y_pred, train_accuracy=train_accuracy)
+    evaluate_and_store(
+        f"Deep Learning ({dl_type})", y_test, y_pred,
+        train_accuracy=train_accuracy, model=model, model_type="keras"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -958,6 +1123,131 @@ if st.session_state.results:
         st.metric("🥇 Best Test Accuracy", f"{best_scores['Accuracy']:.4f}")
         st.metric("✅ F1 Score", f"{best_scores['F1 Score']:.4f}")
 
+    best_artifact = st.session_state.model_artifacts.get(best_model)
+    if best_artifact and best_artifact["model"] is not None:
+        st.markdown("### 💾 Export Best Model")
+        if best_artifact["model_type"] == "sklearn":
+            export_buffer = io.BytesIO()
+            joblib.dump({
+                "model": best_artifact["model"],
+                "scaler": best_artifact["scaler"],
+                "feature_columns": best_artifact["feature_columns"],
+                "target_classes": best_artifact["target_classes"],
+                "preprocessing": best_artifact["preprocessing"],
+            }, export_buffer)
+            st.download_button(
+                "⬇️ Download Best Model (.pkl)",
+                data=export_buffer.getvalue(),
+                file_name="best_model.pkl",
+                mime="application/octet-stream",
+                use_container_width=True,
+            )
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".keras", delete=False) as model_file:
+                model_path = model_file.name
+            best_artifact["model"].save(model_path)
+            with open(model_path, "rb") as model_file:
+                keras_bytes = model_file.read()
+            os.remove(model_path)
+            st.download_button(
+                "⬇️ Download Best Model (.keras)",
+                data=keras_bytes,
+                file_name="best_model.keras",
+                mime="application/octet-stream",
+                use_container_width=True,
+            )
+
+    st.markdown("### 🔮 Predict New / Unseen Data")
+    prediction_model = st.selectbox(
+        "Model for new predictions",
+        list(results_df.index),
+        key="prediction_model",
+    )
+    # FIX: previously only .csv was accepted here. If the person uploaded an
+    # Excel file (like a Netflix dataset .xlsx), Streamlit silently rejected
+    # it, unseen_file stayed None, and the whole block below never ran —
+    # producing no result and no visible error.
+    unseen_file = st.file_uploader(
+        "Upload a CSV or Excel file without the target column",
+        type=["csv", "xlsx", "xls"],
+        key="unseen_data_upload",
+        help="Use the same feature columns used during training.",
+    )
+    if unseen_file is not None:
+        try:
+            if unseen_file.name.lower().endswith((".xlsx", ".xls")):
+                unseen_df = pd.read_excel(unseen_file)
+            else:
+                unseen_df = pd.read_csv(unseen_file)
+        except Exception as read_err:
+            st.error(f"❌ Could not read the uploaded file: {read_err}")
+            st.stop()
+
+        artifact = st.session_state.model_artifacts[prediction_model]
+        unseen_features = preprocess_unseen_features(unseen_df, artifact)
+        selected_for_prediction = artifact["feature_columns"]
+        expected_raw_columns = set(artifact["preprocessing"]["raw_feature_columns"])
+        uploaded_raw_columns = set(unseen_df.columns)
+
+        # FIX: warn (instead of silently predicting garbage) when the uploaded
+        # file's columns don't actually match what the model was trained on.
+        overlap = uploaded_raw_columns & expected_raw_columns
+        if len(overlap) == 0:
+            st.error(
+                "❌ None of the uploaded file's columns match the features this model "
+                f"was trained on. Expected columns: {', '.join(sorted(expected_raw_columns)[:15])}"
+                + (" ..." if len(expected_raw_columns) > 15 else "") +
+                ". Please upload a file with the same column structure as your training data."
+            )
+            st.stop()
+        elif len(overlap) < len(expected_raw_columns):
+            missing = expected_raw_columns - uploaded_raw_columns
+            st.warning(
+                f"⚠️ {len(missing)} expected feature column(s) not found in the uploaded file "
+                f"and will be filled with training-data averages: {', '.join(list(missing)[:10])}"
+                + (" ..." if len(missing) > 10 else "")
+            )
+
+        unseen_features = unseen_features.reindex(columns=selected_for_prediction)
+        if st.button("🔮 Generate Predictions", key="predict_unseen"):
+            if artifact["model_type"] == "keras":
+                probabilities = artifact["model"].predict(
+                    artifact["scaler"].transform(unseen_features), verbose=0
+                )
+                unseen_predictions = (
+                    (probabilities > 0.5).astype(int).flatten()
+                    if num_classes == 2 else np.argmax(probabilities, axis=1)
+                )
+            else:
+                unseen_predictions = artifact["model"].predict(
+                    artifact["scaler"].transform(unseen_features)
+                )
+            prediction_table = unseen_df.copy()
+            prediction_table["Predicted Label"] = display_target_values(
+                unseen_predictions, artifact["target_classes"]
+            )
+            st.dataframe(prediction_table, use_container_width=True)
+            st.download_button(
+                "⬇️ Download Predictions CSV",
+                data=prediction_table.to_csv(index=False).encode("utf-8"),
+                file_name="unseen_data_predictions.csv",
+                mime="text/csv",
+                key="download_unseen_predictions",
+            )
+
+    # FIX (Bug 1): results_df.to_string() returns a single string. Using
+    # list.extend() on a string iterates it character-by-character, corrupting
+    # the report. Use append() to add it as one block instead.
+    report_lines = ["ML + DL Playground Result Report", "", "Model Comparison"]
+    report_lines.append(results_df.to_string())
+    report_lines.extend(["", f"Best Model: {best_model}"])
+    st.download_button(
+        "⬇️ Download Result Report (.txt)",
+        data="\n".join(report_lines).encode("utf-8"),
+        file_name="model_result_report.txt",
+        mime="text/plain",
+    )
+
     st.markdown("---")
     st.markdown("### 📊 Individual Model Results")
     
@@ -999,7 +1289,30 @@ if st.session_state.results:
                 gap = row['Train Accuracy'] - row['Accuracy']
                 st.metric("Train-Test Gap", f"{gap:.4f}")
 
+            artifact = st.session_state.model_artifacts.get(model_name)
+            if artifact:
+                st.markdown("#### Actual vs Predicted Test Rows")
+                prediction_table = build_prediction_table(model_name, artifact)
+                show_wrong_only = st.checkbox(
+                    "Show only incorrect predictions",
+                    key=f"wrong_only_{model_name}",
+                )
+                visible_table = prediction_table[
+                    ~prediction_table["Correct"]
+                ] if show_wrong_only else prediction_table
+                st.dataframe(visible_table, use_container_width=True)
+                st.download_button(
+                    "⬇️ Download Prediction Table CSV",
+                    data=prediction_table.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{model_name.lower().replace(' ', '_')}_predictions.csv",
+                    mime="text/csv",
+                    key=f"download_predictions_{model_name}",
+                )
+
     st.markdown("---")
+    # FIX (Bug 2): points 3, 4 and 5 were duplicated (adjacent string literals
+    # implicitly concatenate in Python), causing repeated/garbled text in this
+    # expander. Rewritten as a single clean block with each point appearing once.
     with st.expander("💡 **Click here for: How to choose the best model?**", expanded=False):
         st.markdown(
             "**1️⃣ Highest Accuracy**\n"
@@ -1008,11 +1321,6 @@ if st.session_state.results:
             "> If F1 score and recall matter, don't just look at accuracy alone.\n\n"
             "**3️⃣ Avoid Overfitting**\n"
             "> Even if accuracy is high, a heavily overfitting model might fail on real data.\n\n"
-            "**4️⃣ Simplicity**\n"
-            "> Sometimes a simpler model (e.g., Logistic Regression) is better and faster than complex ones.\n\n"
-            "**5️⃣ Business Cost**\n"
-            "> False positives and false negatives have different costs in the real world; choose wisely."
-                "> Even if accuracy is high, a heavily overfitting model might fail on real data.\n\n"
             "**4️⃣ Simplicity**\n"
             "> Sometimes a simpler model (e.g., Logistic Regression) is better and faster than complex ones.\n\n"
             "**5️⃣ Business Cost**\n"
