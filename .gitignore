@@ -1,0 +1,16 @@
+# Python virtual environments
+.venv/
+.venv*/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local app data
+data/
+*.db
+
+# Editor / OS
+.vscode/
+.DS_Store
