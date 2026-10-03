@@ -14,6 +14,7 @@ multiple machine learning aur deep learning models ko train aur compare kar sakt
 - Evaluation metrics such as accuracy, precision, recall, F1 score
 - Confusion matrix and classification report
 - Comparison table for all trained models
+- Local SQLite dataset library: every uploaded CSV is saved and can be reused
 
 ## 🧠 Included Models
 
@@ -75,12 +76,17 @@ Browser me app normally `http://localhost:8501` par khulega.
 
 ## 📝 Usage
 
-1. CSV file upload karo
-2. Target column select karo
-3. Test size configure karo
-4. ML model choose karke train karo
-5. ANN ke settings adjust karke deep learning model train karo
-6. Results aur model comparison table dekho
+1. CSV file upload karo; dataset automatically local SQLite database me save hota hai
+2. Purana dataset library se select karke reuse kar sakte ho
+3. Target column select karo
+4. Test size configure karo
+5. ML model choose karke train karo
+6. ANN ke settings adjust karke deep learning model train karo
+7. Results aur model comparison table dekho
+
+Database file `data/ml_dl_playground.db` me create hoti hai. Isme uploaded CSV ka
+content aur basic metadata store hota hai, isliye Streamlit restart ke baad bhi
+saved datasets available rehte hain.
 
 ## 📊 Sample Datasets
 
@@ -110,9 +116,3 @@ Agar demo ke liye dataset chahiye to inme se ek try kar sakte ho:
   ```bash
   pip install tensorflow-cpu
   ```
-
-## 🔧 Troubleshooting
-
-- **TensorFlow install issue**: Agar tensorflow install nahi ho raha, to
-  `pip install tensorflow-cpu` try karo
-- **Port already in use**: `streamlit run app.py --server.port 8502`

@@ -1,3 +1,4 @@
+#...................................................................................................
 """
 ML + DL Playground
 -------------------
@@ -22,6 +23,8 @@ import joblib
 import tempfile
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+from database import delete_dataset, init_database, list_datasets, load_dataset, save_dataset
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -166,6 +169,7 @@ if "results" not in st.session_state:
 if "model_artifacts" not in st.session_state:
     st.session_state.model_artifacts = {}
 
+init_database()
 
 # ---------------------------------------------------------------------------
 # STEP 1: Upload Data
@@ -184,7 +188,23 @@ with col_upload_2:
     st.markdown("### Supported Formats")
     st.markdown("• **CSV** files\n• Tabular data")
 
-if uploaded_file is None:
+saved_datasets = list_datasets()
+selected_saved_id = None
+if saved_datasets:
+    dataset_choices = {
+        f"#{row['id']} · {row['file_name']} · {row['row_count']:,} rows": row["id"]
+        for row in saved_datasets
+    }
+    st.markdown("### 🗄️ Saved Dataset Library")
+    selected_label = st.selectbox(
+        "Use a previously saved dataset",
+        ["-- Select saved dataset --"] + list(dataset_choices),
+        help="Every uploaded CSV is saved locally in SQLite and can be reused later.",
+    )
+    if selected_label != "-- Select saved dataset --":
+        selected_saved_id = dataset_choices[selected_label]
+
+if uploaded_file is None and selected_saved_id is None:
     st.markdown("""
     <div class="info-box">
         <h4>🎯 Getting Started</h4>
@@ -201,14 +221,22 @@ if uploaded_file is None:
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_UPLOAD_ROWS = 50000
 
-if uploaded_file.size > MAX_UPLOAD_BYTES:
-    st.error(
-        f"Uploaded CSV is too large ({uploaded_file.size / (1024 * 1024):.1f} MB). "
-        f"Please upload a file smaller than {MAX_UPLOAD_BYTES / (1024 * 1024):.0f} MB."
-    )
-    st.stop()
+if uploaded_file is not None:
+    uploaded_bytes = uploaded_file.getvalue()
+    if len(uploaded_bytes) > MAX_UPLOAD_BYTES:
+        st.error(
+            f"Uploaded CSV is too large ({len(uploaded_bytes) / (1024 * 1024):.1f} MB). "
+            f"Please upload a file smaller than {MAX_UPLOAD_BYTES / (1024 * 1024):.0f} MB."
+        )
+        st.stop()
+    df = pd.read_csv(io.BytesIO(uploaded_bytes), nrows=MAX_UPLOAD_ROWS)
+    dataset_id = save_dataset(uploaded_file.name, uploaded_bytes, df)
+    st.success(f"✅ Dataset saved in local database (ID: {dataset_id})")
+else:
+    active_file_name, saved_bytes = load_dataset(selected_saved_id)
+    df = pd.read_csv(io.BytesIO(saved_bytes), nrows=MAX_UPLOAD_ROWS)
+    st.info(f"🗄️ Using saved dataset: **{active_file_name}** (ID: {selected_saved_id})")
 
-df = pd.read_csv(uploaded_file, nrows=MAX_UPLOAD_ROWS)
 if len(df) == MAX_UPLOAD_ROWS:
     st.warning(
         f"Only the first {MAX_UPLOAD_ROWS:,} rows were loaded to keep the app responsive."
@@ -1403,6 +1431,38 @@ else:
 
 # Footer
 st.markdown("---")
+with st.expander("🗄️ Manage Saved Datasets"):
+    current_saved_datasets = list_datasets()
+    if current_saved_datasets:
+        dataset_table = pd.DataFrame(
+            [
+                {
+                    "ID": row["id"],
+                    "File": row["file_name"],
+                    "Rows": row["row_count"],
+                    "Created (UTC)": row["created_at"],
+                }
+                for row in current_saved_datasets
+            ]
+        )
+        st.dataframe(dataset_table, use_container_width=True, hide_index=True)
+        delete_id = st.number_input(
+            "Dataset ID to delete",
+            min_value=0,
+            step=1,
+            value=0,
+            help="Delete only the selected saved copy; your original CSV file is not affected.",
+        )
+        if st.button("🗑️ Delete Saved Dataset", key="delete_saved_dataset"):
+            if any(row["id"] == delete_id for row in current_saved_datasets):
+                delete_dataset(delete_id)
+                st.success(f"Dataset {delete_id} deleted.")
+                st.rerun()
+            else:
+                st.warning("Please enter an existing dataset ID.")
+    else:
+        st.caption("No datasets saved yet.")
+
 st.markdown("""
 <div style="text-align: center; color: #666; padding: 2rem;">
     <p><small>🔬 ML + DL Playground | Interactive Machine Learning Platform</small></p>
